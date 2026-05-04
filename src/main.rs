@@ -106,7 +106,7 @@ fn run() -> Result<()> {
     }
 }
 
-fn cmd_check(workspace_root: &PathBuf, json: bool, quiet: bool) -> Result<()> {
+fn cmd_check(workspace_root: &Path, json: bool, quiet: bool) -> Result<()> {
     let shapes = hash_workspace(workspace_root)?;
     let current = to_manifest(&shapes);
 
@@ -189,7 +189,7 @@ fn cmd_check(workspace_root: &PathBuf, json: bool, quiet: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_save(workspace_root: &PathBuf, json: bool) -> Result<()> {
+fn cmd_save(workspace_root: &Path, json: bool) -> Result<()> {
     let shapes = hash_workspace(workspace_root)?;
     let manifest = to_manifest(&shapes);
     save_manifest(workspace_root, &manifest)?;
@@ -206,7 +206,7 @@ fn cmd_save(workspace_root: &PathBuf, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_hash(crate_path: &PathBuf, debug_text: bool) -> Result<()> {
+fn cmd_hash(crate_path: &Path, debug_text: bool) -> Result<()> {
     let shape = hash_crate(crate_path)?;
     if debug_text {
         println!("{}", shape.canonical_text);
@@ -217,7 +217,7 @@ fn cmd_hash(crate_path: &PathBuf, debug_text: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_status(workspace_root: &PathBuf, json: bool) -> Result<()> {
+fn cmd_status(workspace_root: &Path, json: bool) -> Result<()> {
     let shapes = hash_workspace(workspace_root)?;
     let current = to_manifest(&shapes);
 
@@ -270,7 +270,7 @@ fn cmd_status(workspace_root: &PathBuf, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_build(workspace_root: &PathBuf, cargo_args: &[String]) -> Result<()> {
+fn cmd_build(workspace_root: &Path, cargo_args: &[String]) -> Result<()> {
     let baseline = load_manifest(workspace_root)?;
 
     if baseline.is_none() {

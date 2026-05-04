@@ -294,9 +294,7 @@ fn walk_module(file_path: &Path, mod_path: &str, is_crate_root: bool, out: &mut 
         } else {
             format!("{}::{}", mod_path, sub.name)
         };
-        if sub.is_pub {
-            walk_module(&sub_path, &new_mod_path, false, out)?;
-        } else if reexport_targets.contains(&sub.name) {
+        if sub.is_pub || reexport_targets.contains(&sub.name) {
             walk_module(&sub_path, &new_mod_path, false, out)?;
         }
     }
