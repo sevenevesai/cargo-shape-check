@@ -1,6 +1,6 @@
 [package]
 name = "cargo-shape-check"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "Skip unnecessary downstream crate rebuilds by hashing only the public API surface"
 license = "MIT OR Apache-2.0"
