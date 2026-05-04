@@ -42,7 +42,7 @@ pub fn hash_crate(crate_path: &Path) -> Result<CrateShape> {
     }
 
     let mut canonical = String::new();
-    walk_module(&entry, "", &mut canonical)?;
+    walk_module(&entry, "", true, &mut canonical)?;
 
     let mut hasher = Sha256::new();
     hasher.update(canonical.as_bytes());
@@ -255,19 +255,23 @@ fn find_crate_entry(crate_path: &Path) -> Result<PathBuf> {
 // Module walking + public surface extraction
 // ============================================================================
 
-fn walk_module(file_path: &Path, mod_path: &str, out: &mut String) -> Result<()> {
+fn walk_module(file_path: &Path, mod_path: &str, is_crate_root: bool, out: &mut String) -> Result<()> {
     let src = fs::read_to_string(file_path).with_context(|| format!("parse {}", file_path.display()))?;
     let file = syn::parse_file(&src).with_context(|| format!("parse {}", file_path.display()))?;
+
+    let file_stem = file_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
+    // Crate entry points resolve submodules as siblings regardless of filename
+    let effective_stem = if is_crate_root { "lib".to_string() } else { file_stem.clone() };
 
     let mut visitor = ShapeVisitor {
         items: Vec::new(),
         mod_path: mod_path.to_string(),
         file_dir: file_path.parent().map(Path::to_path_buf).unwrap_or_default(),
-        file_stem: file_path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_string(),
+        file_stem: effective_stem,
     };
     visitor.visit_file(&file);
 
@@ -291,12 +295,9 @@ fn walk_module(file_path: &Path, mod_path: &str, out: &mut String) -> Result<()>
             format!("{}::{}", mod_path, sub.name)
         };
         if sub.is_pub {
-            walk_module(&sub_path, &new_mod_path, out)?;
+            walk_module(&sub_path, &new_mod_path, false, out)?;
         } else if reexport_targets.contains(&sub.name) {
-            // Private module with pub use re-exports: walk it so the re-exported
-            // items' definitions are included in the hash. Without this, a change
-            // to a re-exported struct's fields would be a false skip.
-            walk_module(&sub_path, &new_mod_path, out)?;
+            walk_module(&sub_path, &new_mod_path, false, out)?;
         }
     }
 

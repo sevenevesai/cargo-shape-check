@@ -84,16 +84,23 @@ fn run() -> Result<()> {
         command: CargoCmd::ShapeCheck(args),
     } = Cargo::parse();
 
-    let workspace_root = find_workspace_root(args.manifest_path.as_deref())?;
     let action = args.action.unwrap_or(Action::Check);
+
+    // `hash` operates on a single crate and does not need a workspace root
+    if let Action::Hash {
+        crate_path,
+        debug_text,
+    } = action
+    {
+        return cmd_hash(&crate_path, debug_text);
+    }
+
+    let workspace_root = find_workspace_root(args.manifest_path.as_deref())?;
 
     match action {
         Action::Check => cmd_check(&workspace_root, args.json, args.quiet),
         Action::Save => cmd_save(&workspace_root, args.json),
-        Action::Hash {
-            crate_path,
-            debug_text,
-        } => cmd_hash(&crate_path, debug_text),
+        Action::Hash { .. } => unreachable!(),
         Action::Status => cmd_status(&workspace_root, args.json),
         Action::Build { cargo_args } => cmd_build(&workspace_root, &cargo_args),
     }
