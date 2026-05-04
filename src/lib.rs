@@ -280,6 +280,9 @@ fn walk_module(file_path: &Path, mod_path: &str, out: &mut String) -> Result<()>
         out.push('\n');
     }
 
+    // Collect which private modules have items re-exported via `pub use`
+    let reexport_targets = find_reexport_targets(&file);
+
     for sub in find_submodules(&file) {
         let sub_path = resolve_submodule(&visitor.file_dir, &visitor.file_stem, &sub.name)?;
         let new_mod_path = if mod_path.is_empty() {
@@ -289,10 +292,52 @@ fn walk_module(file_path: &Path, mod_path: &str, out: &mut String) -> Result<()>
         };
         if sub.is_pub {
             walk_module(&sub_path, &new_mod_path, out)?;
+        } else if reexport_targets.contains(&sub.name) {
+            // Private module with pub use re-exports: walk it so the re-exported
+            // items' definitions are included in the hash. Without this, a change
+            // to a re-exported struct's fields would be a false skip.
+            walk_module(&sub_path, &new_mod_path, out)?;
         }
     }
 
     Ok(())
+}
+
+/// Find private module names that are targets of `pub use` re-exports.
+///
+/// Matches patterns like:
+///   pub use foo::Bar;
+///   pub use foo::*;
+///   pub use foo::{A, B};
+fn find_reexport_targets(file: &syn::File) -> std::collections::HashSet<String> {
+    let mut targets = std::collections::HashSet::new();
+    for item in &file.items {
+        if let syn::Item::Use(u) = item {
+            if !matches!(u.vis, syn::Visibility::Public(_)) {
+                continue;
+            }
+            collect_use_roots(&u.tree, &mut targets);
+        }
+    }
+    targets
+}
+
+fn collect_use_roots(tree: &syn::UseTree, targets: &mut std::collections::HashSet<String>) {
+    match tree {
+        syn::UseTree::Path(p) => {
+            let name = p.ident.to_string();
+            let name = name.strip_prefix("r#").unwrap_or(&name).to_string();
+            // Only the first path segment is a local module name
+            targets.insert(name);
+        }
+        syn::UseTree::Group(g) => {
+            for item in &g.items {
+                collect_use_roots(item, targets);
+            }
+        }
+        // `pub use SomeItem;` or `pub use *;` at root level -- no module prefix
+        syn::UseTree::Name(_) | syn::UseTree::Rename(_) | syn::UseTree::Glob(_) => {}
+    }
 }
 
 struct SubmoduleDecl {

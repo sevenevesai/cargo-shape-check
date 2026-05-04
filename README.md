@@ -139,10 +139,6 @@ will not change the hash.
 
 ## Known limitations
 
-- **`pub use private_mod::Item`** re-exports from private modules are not
-  resolved. If the re-exported item changes in a way not visible from the
-  `pub use` declaration, this may produce a false skip.
-
 - **Macro-generated public surfaces** are not detected. The tool parses source
   text, not macro-expanded output.
 
