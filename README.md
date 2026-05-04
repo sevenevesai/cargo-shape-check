@@ -24,8 +24,31 @@ cargo install cargo-shape-check
 
 ## Usage
 
-Save the current public API hashes as a baseline, make some changes, then check
-what changed.
+Use `build` as a drop-in replacement for `cargo build`. On its first run it
+performs a full build and saves a baseline of every crate's public API hash. On
+subsequent runs it uses git to find which crates have source changes, hashes
+only those, and skips downstream dependents when no public API changed.
+
+```console
+$ cargo shape-check build
+shape-check: no baseline found, running full build and saving baseline
+   Compiling stdx v0.0.0
+   ...
+    Finished `dev` profile in 1m 37s
+shape-check: baseline saved (44 crates)
+
+$ echo "// private comment" >> crates/stdx/src/lib.rs
+
+$ cargo shape-check build
+   Compiling stdx v0.0.0
+    Finished `dev` profile in 3.02s
+shape-check: private changes only in [stdx], 43 downstream crates skipped
+```
+
+Extra arguments are forwarded to cargo. For example `cargo shape-check build
+--release` passes `--release` through to the underlying `cargo build`.
+
+The diagnostic commands are useful for scripting and CI:
 
 ```console
 $ cargo shape-check save
@@ -37,15 +60,6 @@ All 44 crates have unchanged public APIs. Downstream rebuilds can be skipped.
 $ cargo shape-check check --quiet
 Public API changed (1):
   ~ stdx  544756717d56c90c -> 0fd2bae739a50167
-```
-
-The `status` command exits 0 when all public APIs are unchanged and 1 when any
-crate has a public surface change. The `check` command shows a full diff against
-the saved baseline.
-
-```console
-$ cargo shape-check hash path/to/crate
-a3f2b8c9d1e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0
 
 $ cargo shape-check check --json
 {
@@ -55,6 +69,10 @@ $ cargo shape-check check --json
   "removed": []
 }
 ```
+
+The `status` command exits 0 when all public APIs are unchanged and 1 when any
+crate has a public surface change. `check` shows a full diff against the saved
+baseline. `hash` prints the hash of a single crate.
 
 <br>
 

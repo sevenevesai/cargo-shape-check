@@ -1,10 +1,11 @@
 use anyhow::{Context, Result};
 use cargo_shape_check::{
-    diff_manifests, hash_crate, hash_workspace, load_manifest, save_manifest, to_manifest,
-    MANIFEST_FILENAME,
+    crate_rel_paths, diff_manifests, hash_crate, hash_workspace, load_manifest, save_manifest,
+    to_manifest, workspace_crate_map, MANIFEST_FILENAME,
 };
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 use std::process;
 
 #[derive(Parser)]
@@ -63,6 +64,12 @@ enum Action {
     },
     /// Show the dependency-graph impact of current changes
     Status,
+    /// Build the workspace, skipping downstream rebuilds when public APIs are unchanged
+    Build {
+        /// Extra arguments passed to cargo build
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        cargo_args: Vec<String>,
+    },
 }
 
 fn main() {
@@ -88,6 +95,7 @@ fn run() -> Result<()> {
             debug_text,
         } => cmd_hash(&crate_path, debug_text),
         Action::Status => cmd_status(&workspace_root, args.json),
+        Action::Build { cargo_args } => cmd_build(&workspace_root, &cargo_args),
     }
 }
 
@@ -251,6 +259,175 @@ fn cmd_status(workspace_root: &PathBuf, json: bool) -> Result<()> {
 
     if !private_only {
         process::exit(1);
+    }
+    Ok(())
+}
+
+fn cmd_build(workspace_root: &PathBuf, cargo_args: &[String]) -> Result<()> {
+    let baseline = load_manifest(workspace_root)?;
+
+    if baseline.is_none() {
+        eprintln!("shape-check: no baseline found, running full build and saving baseline");
+        run_cargo(workspace_root, &["build"], cargo_args)?;
+        let shapes = hash_workspace(workspace_root)?;
+        save_manifest(workspace_root, &to_manifest(&shapes))?;
+        eprintln!(
+            "shape-check: baseline saved ({} crates)",
+            shapes.len()
+        );
+        return Ok(());
+    }
+    let baseline = baseline.unwrap();
+
+    let changed_crates = find_changed_crates(workspace_root)?;
+    if changed_crates.is_empty() {
+        run_cargo(workspace_root, &["build"], cargo_args)?;
+        return Ok(());
+    }
+
+    let crate_map = workspace_crate_map(workspace_root)?;
+    let total_crates = crate_map.len();
+
+    let mut public_changes: Vec<String> = Vec::new();
+    let mut private_changes: Vec<String> = Vec::new();
+
+    for name in &changed_crates {
+        if let Some(path) = crate_map.get(name) {
+            match hash_crate(path) {
+                Ok(shape) => {
+                    if baseline.crates.get(name) != Some(&shape.hash) {
+                        public_changes.push(name.clone());
+                    } else {
+                        private_changes.push(name.clone());
+                    }
+                }
+                Err(_) => {
+                    public_changes.push(name.clone());
+                }
+            }
+        }
+    }
+
+    if !public_changes.is_empty() {
+        eprintln!(
+            "shape-check: public API changed in [{}], full rebuild",
+            public_changes.join(", ")
+        );
+        run_cargo(workspace_root, &["build"], cargo_args)?;
+        let shapes = hash_workspace(workspace_root)?;
+        save_manifest(workspace_root, &to_manifest(&shapes))?;
+        return Ok(());
+    }
+
+    // Private changes only. Build just the changed crates, skip their dependents.
+    let pkg_args: Vec<String> = changed_crates
+        .iter()
+        .flat_map(|name| vec!["-p".to_string(), name.clone()])
+        .collect();
+
+    let mut all_args = pkg_args.iter().map(|s| s.as_str()).collect::<Vec<_>>();
+    let extra: Vec<&str> = cargo_args.iter().map(|s| s.as_str()).collect();
+    all_args.extend(&extra);
+
+    let build_args: Vec<&str> = std::iter::once("build").chain(all_args).collect();
+    run_cargo_raw(workspace_root, &build_args)?;
+
+    let skipped = total_crates - changed_crates.len();
+    eprintln!(
+        "shape-check: private changes only in [{}], {} downstream crates skipped",
+        changed_crates.iter().cloned().collect::<Vec<_>>().join(", "),
+        skipped
+    );
+    Ok(())
+}
+
+fn find_changed_crates(workspace_root: &Path) -> Result<BTreeSet<String>> {
+    let rel_paths = crate_rel_paths(workspace_root)?;
+
+    // Collect all changed files from git
+    let mut changed_files: Vec<String> = Vec::new();
+
+    // Unstaged changes
+    if let Ok(output) = std::process::Command::new("git")
+        .args(["diff", "--name-only"])
+        .current_dir(workspace_root)
+        .output()
+    {
+        if output.status.success() {
+            for line in String::from_utf8_lossy(&output.stdout).lines() {
+                let trimmed = line.trim();
+                if !trimmed.is_empty() {
+                    changed_files.push(trimmed.to_string());
+                }
+            }
+        }
+    }
+
+    // Staged changes
+    if let Ok(output) = std::process::Command::new("git")
+        .args(["diff", "--name-only", "--cached"])
+        .current_dir(workspace_root)
+        .output()
+    {
+        if output.status.success() {
+            for line in String::from_utf8_lossy(&output.stdout).lines() {
+                let trimmed = line.trim();
+                if !trimmed.is_empty() {
+                    changed_files.push(trimmed.to_string());
+                }
+            }
+        }
+    }
+
+    // Untracked files
+    if let Ok(output) = std::process::Command::new("git")
+        .args(["ls-files", "--others", "--exclude-standard"])
+        .current_dir(workspace_root)
+        .output()
+    {
+        if output.status.success() {
+            for line in String::from_utf8_lossy(&output.stdout).lines() {
+                let trimmed = line.trim();
+                if !trimmed.is_empty() {
+                    changed_files.push(trimmed.to_string());
+                }
+            }
+        }
+    }
+
+    // Map files to crates
+    let mut result = BTreeSet::new();
+    for file in &changed_files {
+        let normalized = file.replace('\\', "/");
+        if !normalized.ends_with(".rs") && !normalized.ends_with("Cargo.toml") {
+            continue;
+        }
+        for (name, rel) in &rel_paths {
+            if normalized.starts_with(&format!("{}/", rel)) {
+                result.insert(name.clone());
+                break;
+            }
+        }
+    }
+
+    Ok(result)
+}
+
+fn run_cargo(workspace_root: &Path, command: &[&str], extra_args: &[String]) -> Result<()> {
+    let extra: Vec<&str> = extra_args.iter().map(|s| s.as_str()).collect();
+    let all: Vec<&str> = command.iter().copied().chain(extra).collect();
+    run_cargo_raw(workspace_root, &all)
+}
+
+fn run_cargo_raw(workspace_root: &Path, args: &[&str]) -> Result<()> {
+    let status = std::process::Command::new("cargo")
+        .args(args)
+        .current_dir(workspace_root)
+        .status()
+        .context("failed to run cargo")?;
+
+    if !status.success() {
+        process::exit(status.code().unwrap_or(1));
     }
     Ok(())
 }

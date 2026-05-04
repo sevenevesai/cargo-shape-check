@@ -85,6 +85,33 @@ pub fn diff_manifests(
     (unchanged, changed, added)
 }
 
+pub fn workspace_crate_map(workspace_root: &Path) -> Result<BTreeMap<String, PathBuf>> {
+    let members = resolve_workspace_members(workspace_root)?;
+    let mut map = BTreeMap::new();
+    for crate_path in members {
+        if let Ok(name) = crate_name(&crate_path) {
+            map.insert(name, crate_path);
+        }
+    }
+    Ok(map)
+}
+
+pub fn crate_rel_paths(workspace_root: &Path) -> Result<BTreeMap<String, String>> {
+    let members = resolve_workspace_members(workspace_root)?;
+    let mut map = BTreeMap::new();
+    for crate_path in members {
+        if let Ok(name) = crate_name(&crate_path) {
+            let rel = crate_path
+                .strip_prefix(workspace_root)
+                .unwrap_or(&crate_path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            map.insert(name, rel);
+        }
+    }
+    Ok(map)
+}
+
 pub const MANIFEST_FILENAME: &str = ".shape-check.json";
 
 pub fn load_manifest(workspace_root: &Path) -> Result<Option<ShapeManifest>> {
