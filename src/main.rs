@@ -351,48 +351,19 @@ fn cmd_build(workspace_root: &Path, cargo_args: &[String]) -> Result<()> {
 fn find_changed_crates(workspace_root: &Path) -> Result<BTreeSet<String>> {
     let rel_paths = crate_rel_paths(workspace_root)?;
 
-    // Collect all changed files from git
     let mut changed_files: Vec<String> = Vec::new();
-
-    // Unstaged changes
-    if let Ok(output) = std::process::Command::new("git")
-        .args(["diff", "--name-only"])
-        .current_dir(workspace_root)
-        .output()
-    {
-        if output.status.success() {
-            for line in String::from_utf8_lossy(&output.stdout).lines() {
-                let trimmed = line.trim();
-                if !trimmed.is_empty() {
-                    changed_files.push(trimmed.to_string());
-                }
-            }
-        }
-    }
-
-    // Staged changes
-    if let Ok(output) = std::process::Command::new("git")
-        .args(["diff", "--name-only", "--cached"])
-        .current_dir(workspace_root)
-        .output()
-    {
-        if output.status.success() {
-            for line in String::from_utf8_lossy(&output.stdout).lines() {
-                let trimmed = line.trim();
-                if !trimmed.is_empty() {
-                    changed_files.push(trimmed.to_string());
-                }
-            }
-        }
-    }
-
-    // Untracked files
-    if let Ok(output) = std::process::Command::new("git")
-        .args(["ls-files", "--others", "--exclude-standard"])
-        .current_dir(workspace_root)
-        .output()
-    {
-        if output.status.success() {
+    let git_queries: &[&[&str]] = &[
+        &["diff", "--name-only"],
+        &["diff", "--name-only", "--cached"],
+        &["ls-files", "--others", "--exclude-standard"],
+    ];
+    for args in git_queries {
+        if let Ok(output) = std::process::Command::new("git")
+            .args(*args)
+            .current_dir(workspace_root)
+            .output()
+            && output.status.success()
+        {
             for line in String::from_utf8_lossy(&output.stdout).lines() {
                 let trimmed = line.trim();
                 if !trimmed.is_empty() {

@@ -229,12 +229,11 @@ fn find_crate_entry(crate_path: &Path) -> Result<PathBuf> {
         if let Some(lib) = v.get("lib").and_then(|l| l.get("path")).and_then(|p| p.as_str()) {
             return Ok(crate_path.join(lib));
         }
-        if let Some(bins) = v.get("bin").and_then(|b| b.as_array()) {
-            if let Some(first) = bins.first() {
-                if let Some(p) = first.get("path").and_then(|p| p.as_str()) {
-                    return Ok(crate_path.join(p));
-                }
-            }
+        if let Some(bins) = v.get("bin").and_then(|b| b.as_array())
+            && let Some(first) = bins.first()
+            && let Some(p) = first.get("path").and_then(|p| p.as_str())
+        {
+            return Ok(crate_path.join(p));
         }
     }
     let candidates = [
@@ -347,13 +346,13 @@ struct SubmoduleDecl {
 fn find_submodules(file: &syn::File) -> Vec<SubmoduleDecl> {
     let mut subs = Vec::new();
     for item in &file.items {
-        if let syn::Item::Mod(m) = item {
-            if m.content.is_none() {
-                let is_pub = matches!(m.vis, syn::Visibility::Public(_));
-                let name = m.ident.to_string();
-                let name = name.strip_prefix("r#").unwrap_or(&name).to_string();
-                subs.push(SubmoduleDecl { name, is_pub });
-            }
+        if let syn::Item::Mod(m) = item
+            && m.content.is_none()
+        {
+            let is_pub = matches!(m.vis, syn::Visibility::Public(_));
+            let name = m.ident.to_string();
+            let name = name.strip_prefix("r#").unwrap_or(&name).to_string();
+            subs.push(SubmoduleDecl { name, is_pub });
         }
     }
     subs
