@@ -82,19 +82,20 @@ Cargo uses file mtimes (or optionally content checksums) to decide when to
 rebuild. When a source file in a leaf crate changes, all transitive dependents
 are rebuilt, regardless of whether the public API actually changed.
 
-In large Rust workspaces this creates significant wasted work. We measured four
-major open source projects by walking 200 recent commits each, hashing the
+In large Rust workspaces this creates significant wasted work. We measured five
+major open source projects by walking ~200 recent commits each, hashing the
 public API at each commit, and counting how many downstream rebuilds were
 triggered by changes that did not alter the public surface.
 
 | Project | Crates | Private-only changes | Wasted downstream rebuilds |
 |---|---|---|---|
+| Zed | 239 | 66% | 51% |
 | rust-analyzer | 44 | 75% | 66% |
 | Bevy | 78 | 73% | 70% |
 | Nushell | 38 | 95% | 93% |
 | Deno | 73 | 78% | 81% |
 
-73 to 95% of crate-level source changes across these projects do not touch the
+66 to 95% of crate-level source changes across these projects do not touch the
 public API. Cargo rebuilds downstream anyway. See
 [rust-lang/cargo#14604](https://github.com/rust-lang/cargo/issues/14604) for
 upstream discussion of this problem.
