@@ -1,12 +1,73 @@
-# cargo-shape-check
+# Public API shape hashing for Cargo workspaces
 
-Skip unnecessary downstream crate rebuilds by hashing only the public API surface.
+[<img alt="github" src="https://img.shields.io/badge/github-sevenevesai/cargo--shape--check-8da0cb?style=for-the-badge&labelColor=555555&logo=github" height="20">](https://github.com/sevenevesai/cargo-shape-check)
+[<img alt="crates.io" src="https://img.shields.io/crates/v/cargo-shape-check.svg?style=for-the-badge&color=fc8d62&logo=rust" height="20">](https://crates.io/crates/cargo-shape-check)
 
-Cargo rebuilds every downstream dependent when any source file in an upstream crate changes — even if the change is purely internal (a comment, a private function body, a local variable rename). `cargo-shape-check` detects when a crate's *public API* is unchanged and reports that downstream rebuilds can be safely skipped.
+Cargo rebuilds every downstream dependent when any source file in an upstream
+crate changes, even if the change is purely internal. `cargo-shape-check`
+hashes only the public API surface of each crate in a workspace and reports
+which crates actually changed their public interface.
 
-## The problem
+In controlled experiments on rust-analyzer, skipping unnecessary downstream
+rebuilds delivers a **35x speedup** on private edits (17s to 0.5s) with zero
+false-skips across 25 test cases.
 
-In a Cargo workspace with many internal crates, editing a high-fanin leaf crate triggers a rebuild cascade across all dependents. Our measurements across four major Rust projects show:
+<br>
+
+## Install
+
+```
+cargo install cargo-shape-check
+```
+
+<br>
+
+## Usage
+
+Save the current public API hashes as a baseline, make some changes, then check
+what changed.
+
+```console
+$ cargo shape-check save
+Saved 44 crate hashes to .shape-check.json
+
+$ cargo shape-check status
+All 44 crates have unchanged public APIs. Downstream rebuilds can be skipped.
+
+$ cargo shape-check check --quiet
+Public API changed (1):
+  ~ stdx  544756717d56c90c -> 0fd2bae739a50167
+```
+
+The `status` command exits 0 when all public APIs are unchanged and 1 when any
+crate has a public surface change. The `check` command shows a full diff against
+the saved baseline.
+
+```console
+$ cargo shape-check hash path/to/crate
+a3f2b8c9d1e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0
+
+$ cargo shape-check check --json
+{
+  "unchanged": ["hir", "hir-def", ...],
+  "changed": ["stdx"],
+  "added": [],
+  "removed": []
+}
+```
+
+<br>
+
+## Motivation
+
+Cargo uses file mtimes (or optionally content checksums) to decide when to
+rebuild. When a source file in a leaf crate changes, all transitive dependents
+are rebuilt, regardless of whether the public API actually changed.
+
+In large Rust workspaces this creates significant wasted work. We measured four
+major open source projects by walking 200 recent commits each, hashing the
+public API at each commit, and counting how many downstream rebuilds were
+triggered by changes that did not alter the public surface.
 
 | Project | Crates | Private-only changes | Wasted downstream rebuilds |
 |---|---|---|---|
@@ -15,113 +76,97 @@ In a Cargo workspace with many internal crates, editing a high-fanin leaf crate 
 | Nushell | 38 | 95% | 93% |
 | Deno | 73 | 78% | 81% |
 
-**73–95% of crate-level source changes don't touch the public API.** Cargo rebuilds downstream anyway.
+73 to 95% of crate-level source changes across these projects do not touch the
+public API. Cargo rebuilds downstream anyway. See
+[rust-lang/cargo#14604](https://github.com/rust-lang/cargo/issues/14604) for
+upstream discussion of this problem.
 
-In controlled experiments on rust-analyzer, skipping unnecessary downstream rebuilds delivers a **35× speedup** on private edits (17s → 0.5s) with zero false-skips across 25 test cases.
-
-## Install
-
-```
-cargo install cargo-shape-check
-```
-
-Or from source:
-
-```
-git clone https://github.com/sevenevesai/cargo-shape-check
-cd cargo-shape-check
-cargo install --path .
-```
-
-## Usage
-
-```bash
-# Save the current public API hashes as a baseline
-cargo shape-check save
-
-# Make some changes, then check what changed
-cargo shape-check check
-
-# Quick verdict: skip or rebuild?
-cargo shape-check status
-
-# Hash a single crate
-cargo shape-check hash path/to/crate
-
-# JSON output for scripting
-cargo shape-check check --json
-cargo shape-check status --json
-```
-
-### Typical workflow
-
-```bash
-# At the start of a work session (or in CI after checkout)
-cargo shape-check save
-
-# After editing code
-cargo shape-check status
-# "All 44 crates have unchanged public APIs. Downstream rebuilds can be skipped."
-# → only rebuild the leaf crate you edited
-
-# Or if you changed a public signature:
-# "Public API changes detected — downstream rebuild required"
-# → run the full cargo build
-```
-
-### CI integration
-
-```yaml
-- name: Check for unnecessary rebuilds
-  run: |
-    cargo shape-check save
-    # ... run your changes ...
-    cargo shape-check status --json | jq '.verdict'
-```
+<br>
 
 ## What gets hashed
 
-The public API surface includes:
-- `pub fn` signatures (return types, parameters, generics, bounds)
-- `pub struct` / `pub enum` definitions (all fields, variants, `#[repr]`)
-- `pub trait` definitions (including default method bodies)
-- `pub type` aliases, `pub const`, `pub static`
-- `pub use` re-exports
-- `#[macro_export]` macros
-- `impl` blocks (public methods and trait implementations)
+The public surface of a crate consists of all items visible to downstream
+dependents. Specifically:
 
-Bodies of `pub fn` are included in the hash when downstream crates can see them:
-- `#[inline]` / `#[inline(always)]` functions
-- Generic functions (type or const params — downstream monomorphizes)
-- `const fn` (downstream may const-evaluate)
+- **Functions** `pub fn` signatures including return types, parameters,
+  generics, and bounds. Bodies are excluded unless downstream crates can see
+  them (see below).
 
-Bodies of non-inline, non-generic, non-const `pub fn` are **excluded** — changes to these are invisible to downstream crates.
+- **Data types** `pub struct`, `pub enum` definitions including all fields,
+  variants, and repr attributes.
 
-## What is NOT hashed (known limitations)
+- **Traits** `pub trait` definitions including default method bodies, which
+  downstream crates use directly.
 
-- **`pub use private_mod::Item` re-exports**: we don't resolve the re-export target from private modules
-- **Macro-generated public surfaces**: we parse source text, not expanded macros
-- **Auto-trait inference** (`Send`/`Sync`): a private field type change can alter auto-trait impls without changing the parsed source
-- **`pub fn() -> impl Trait`**: the inferred concrete type is not visible in source
+- **Other items** `pub type` aliases, `pub const`, `pub static`, `pub use`
+  re-exports, and `#[macro_export]` macros.
 
-These are documented soundness gaps. For the vast majority of edits (75%+ as measured), the hash correctly identifies private-only changes. False-rebuilds (hash changes when it shouldn't) are safe; false-skips are the risk, and none were observed in 25 test cases.
+- **Impl blocks** Public methods and trait implementations, including the impl
+  header and associated types/consts.
+
+Function bodies are included in the hash when downstream crates can observe
+them:
+
+- `#[inline]` and `#[inline(always)]` functions, whose bodies are inlined into
+  call sites
+- Generic functions with type or const parameters, which downstream crates
+  monomorphize
+- `const fn`, whose bodies downstream crates may const-evaluate
+
+All other `pub fn` bodies are excluded from the hash. A comment change, a local
+variable rename, or a refactor inside a non-inline non-generic function body
+will not change the hash.
+
+<br>
+
+## Known limitations
+
+- **`pub use private_mod::Item`** re-exports from private modules are not
+  resolved. If the re-exported item changes in a way not visible from the
+  `pub use` declaration, this may produce a false skip.
+
+- **Macro-generated public surfaces** are not detected. The tool parses source
+  text, not macro-expanded output.
+
+- **Auto-trait inference** changes (`Send`/`Sync` becoming `!Send`/`!Sync` due
+  to a private field type change) are not detected from source-level parsing.
+
+- **`pub fn() -> impl Trait`** where the inferred concrete type changes without
+  the source signature changing.
+
+These are inherent to a source-level approach. A rustc-internal implementation
+operating on post-expansion, type-resolved data would close these gaps.
+
+No false-skips were observed across 25 adversarial test cases covering comments,
+local variable renames, private function additions, doc-only changes, generic
+function body edits, inline function body edits, new public items, visibility
+changes, and trait method additions.
+
+<br>
 
 ## How it works
 
-1. Parses each crate's source tree with [`syn`](https://crates.io/crates/syn)
-2. Extracts all publicly-visible items using a `Visit` traversal
-3. Canonicalizes the output (sorted, formatted via `quote`)
+1. Parses each crate's source tree with [syn](https://crates.io/crates/syn)
+2. Extracts publicly-visible items using a `syn::visit::Visit` traversal
+3. Canonicalizes the output (sorted, formatted via [quote](https://crates.io/crates/quote))
 4. Hashes with SHA-256
-5. Compares against saved baseline to detect changes
+5. Compares against a saved baseline to detect changes
 
-No compilation required. No nightly toolchain. Runs in ~25ms per crate.
+No compilation required. No nightly toolchain. Hashing runs in ~25ms per crate.
 
-## Background
+<br>
 
-This tool validates the hypothesis behind [rust-lang/cargo#14604](https://github.com/rust-lang/cargo/issues/14604): that interface-shape hashing can eliminate unnecessary downstream rebuilds. TypeScript has done this since 2019 (via d.ts text hashing); Cargo does not.
+#### License
 
-Our empirical measurements show the approach works and the speedup is large. A production implementation inside rustc/cargo (the approach prototyped by [Zed](https://github.com/zed-industries/zed)) would close the remaining soundness gaps by operating on post-expansion, type-resolved data.
+<sup>
+Licensed under either of <a href="LICENSE-APACHE">Apache License, Version
+2.0</a> or <a href="LICENSE-MIT">MIT license</a> at your option.
+</sup>
 
-## License
+<br>
 
-MIT OR Apache-2.0
+<sub>
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in this crate by you, as defined in the Apache-2.0 license, shall
+be dual licensed as above, without any additional terms or conditions.
+</sub>
