@@ -64,7 +64,7 @@ enum Action {
     },
     /// Show the dependency-graph impact of current changes
     Status,
-    /// Build the workspace, skipping downstream rebuilds when public APIs are unchanged
+    /// Build using -p scoping: rebuild only changed crates when public APIs are unchanged
     Build {
         /// Extra arguments passed to cargo build
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -293,10 +293,8 @@ fn cmd_build(workspace_root: &Path, cargo_args: &[String]) -> Result<()> {
     }
 
     let crate_map = workspace_crate_map(workspace_root)?;
-    let total_crates = crate_map.len();
 
     let mut public_changes: Vec<String> = Vec::new();
-    let mut private_changes: Vec<String> = Vec::new();
 
     for name in &changed_crates {
         if let Some(path) = crate_map.get(name) {
@@ -304,8 +302,6 @@ fn cmd_build(workspace_root: &Path, cargo_args: &[String]) -> Result<()> {
                 Ok(shape) => {
                     if baseline.crates.get(name) != Some(&shape.hash) {
                         public_changes.push(name.clone());
-                    } else {
-                        private_changes.push(name.clone());
                     }
                 }
                 Err(_) => {
@@ -326,7 +322,26 @@ fn cmd_build(workspace_root: &Path, cargo_args: &[String]) -> Result<()> {
         return Ok(());
     }
 
-    // Private changes only. Build just the changed crates, skip their dependents.
+    // Private changes only — build changed crates plus any user-specified -p targets.
+    // User's cargo_args (including any -p flags) are appended, so
+    // `cargo shape-check build -p rust-analyzer` with a private stdx change
+    // becomes `cargo build -p stdx -p rust-analyzer`.
+    let changed_list: Vec<_> = changed_crates.iter().cloned().collect();
+    let user_targets = extract_package_targets(cargo_args);
+
+    if user_targets.is_empty() {
+        eprintln!(
+            "shape-check: private-only changes in [{}], rebuilding changed crates only",
+            changed_list.join(", "),
+        );
+    } else {
+        eprintln!(
+            "shape-check: private-only changes in [{}], also building requested packages [{}]",
+            changed_list.join(", "),
+            user_targets.join(", "),
+        );
+    }
+
     let pkg_args: Vec<String> = changed_crates
         .iter()
         .flat_map(|name| vec!["-p".to_string(), name.clone()])
@@ -338,14 +353,24 @@ fn cmd_build(workspace_root: &Path, cargo_args: &[String]) -> Result<()> {
 
     let build_args: Vec<&str> = std::iter::once("build").chain(all_args).collect();
     run_cargo_raw(workspace_root, &build_args)?;
-
-    let skipped = total_crates - changed_crates.len();
-    eprintln!(
-        "shape-check: private changes only in [{}], {} downstream crates skipped",
-        changed_crates.iter().cloned().collect::<Vec<_>>().join(", "),
-        skipped
-    );
     Ok(())
+}
+
+fn extract_package_targets(cargo_args: &[String]) -> Vec<String> {
+    let mut targets = Vec::new();
+    let mut iter = cargo_args.iter();
+    while let Some(arg) = iter.next() {
+        if arg == "-p" || arg == "--package" {
+            if let Some(name) = iter.next() {
+                targets.push(name.clone());
+            }
+        } else if let Some(name) = arg.strip_prefix("-p=") {
+            targets.push(name.to_string());
+        } else if let Some(name) = arg.strip_prefix("--package=") {
+            targets.push(name.to_string());
+        }
+    }
+    targets
 }
 
 fn find_changed_crates(workspace_root: &Path) -> Result<BTreeSet<String>> {

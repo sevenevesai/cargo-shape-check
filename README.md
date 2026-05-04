@@ -5,12 +5,8 @@
 
 Cargo rebuilds every downstream dependent when any source file in an upstream
 crate changes, even if the change is purely internal. `cargo-shape-check`
-hashes only the public API surface of each crate in a workspace and reports
+hashes only the public API surface of each crate in a workspace and tells you
 which crates actually changed their public interface.
-
-In controlled experiments on rust-analyzer, skipping unnecessary downstream
-rebuilds delivers a **35x speedup** on private edits (17s to 0.5s) with zero
-false-skips across 25 test cases.
 
 <br>
 
@@ -24,55 +20,66 @@ cargo install cargo-shape-check
 
 ## Usage
 
-Use `build` as a drop-in replacement for `cargo build`. On its first run it
-performs a full build and saves a baseline of every crate's public API hash. On
-subsequent runs it uses git to find which crates have source changes, hashes
-only those, and skips downstream dependents when no public API changed.
-
-```console
-$ cargo shape-check build
-shape-check: no baseline found, running full build and saving baseline
-   Compiling stdx v0.0.0
-   ...
-    Finished `dev` profile in 1m 37s
-shape-check: baseline saved (44 crates)
-
-$ echo "// private comment" >> crates/stdx/src/lib.rs
-
-$ cargo shape-check build
-   Compiling stdx v0.0.0
-    Finished `dev` profile in 3.02s
-shape-check: private changes only in [stdx], 43 downstream crates skipped
-```
-
-Extra arguments are forwarded to cargo. For example `cargo shape-check build
---release` passes `--release` through to the underlying `cargo build`.
-
-The diagnostic commands are useful for scripting and CI:
+The diagnostic commands tell you whether changes are private-only or touch the
+public API:
 
 ```console
 $ cargo shape-check save
 Saved 44 crate hashes to .shape-check.json
 
-$ cargo shape-check status
-All 44 crates have unchanged public APIs. Downstream rebuilds can be skipped.
+$ echo "// private comment" >> crates/stdx/src/lib.rs
 
 $ cargo shape-check check --quiet
-Public API changed (1):
-  ~ stdx  544756717d56c90c -> 0fd2bae739a50167
+No public API changes detected across 44 crates. Downstream rebuilds can be skipped.
 
-$ cargo shape-check check --json
+$ cargo shape-check status --json
 {
-  "unchanged": ["hir", "hir-def", ...],
-  "changed": ["stdx"],
+  "private_only": true,
+  "unchanged_count": 44,
+  "changed": [],
   "added": [],
-  "removed": []
+  "verdict": "skip"
 }
 ```
 
-The `status` command exits 0 when all public APIs are unchanged and 1 when any
-crate has a public surface change. `check` shows a full diff against the saved
-baseline. `hash` prints the hash of a single crate.
+`check` diffs the current state against the saved baseline and exits 1 if any
+public API changed. `status` gives a summary verdict. `hash` prints the hash of
+a single crate:
+
+```console
+$ cargo shape-check hash crates/stdx
+a1b2c3d4e5f6...
+```
+
+### Build command
+
+The `build` subcommand wraps `cargo build` with `-p` scoping. It uses git to
+find which crates have source changes, hashes them, and passes only the changed
+crates to `cargo build -p` when their public API is unchanged. Any user-supplied
+arguments (including `-p` targets) are forwarded to cargo.
+
+```console
+$ cargo shape-check build
+shape-check: no baseline found, running full build and saving baseline
+shape-check: baseline saved (44 crates)
+
+$ echo "// private comment" >> crates/stdx/src/lib.rs
+
+$ cargo shape-check build
+shape-check: private-only changes in [stdx], rebuilding changed crates only
+```
+
+**Important:** The `-p` scoping means the build command only rebuilds the
+changed crates themselves. It does not rebuild their downstream dependents or
+re-link workspace binaries. This is fast (~0.5s vs ~17s for a full workspace
+rebuild on rust-analyzer) but it is not the same build graph as `cargo build`.
+Cargo does not retain this analysis between invocations, so the next `cargo
+build` (or IDE background check) will rebuild dependents normally.
+
+Fully skipping unnecessary downstream rebuilds requires native support inside
+cargo's fingerprinting. See
+[rust-lang/cargo#14604](https://github.com/rust-lang/cargo/issues/14604) for
+the upstream proposal.
 
 <br>
 
@@ -99,6 +106,69 @@ triggered by changes that did not alter the public surface.
 public API. Cargo rebuilds downstream anyway. See
 [rust-lang/cargo#14604](https://github.com/rust-lang/cargo/issues/14604) for
 upstream discussion of this problem.
+
+<br>
+
+## Measurements
+
+The speedup numbers were measured on rust-analyzer
+(`d8e48581c354d482e8edd5e1c529d3200c92abc0`) with the `stdx` crate (22
+in-workspace dependents).
+
+**What was compared:**
+- **Baseline:** `cargo build --quiet` (full workspace) after applying a private
+  edit to stdx. ~17s median.
+- **Scoped build:** `cargo build --quiet -p stdx` + shape hash check (~0.5s
+  median) after the same edit.
+
+This measures the time to rebuild the changed crate in isolation vs rebuilding
+the full workspace. The scoped build does not rebuild dependents or re-link
+workspace binaries.
+
+25 adversarial test cases (comments, local renames, doc changes, generic body
+edits, inline body edits, new pub items, visibility changes, trait method
+additions) all classified correctly with 0 false-skips.
+
+**Repro steps** (rust-analyzer):
+
+```bash
+# Clone and build rust-analyzer
+git clone https://github.com/rust-lang/rust-analyzer
+cd rust-analyzer
+git checkout d8e48581c354d482e8edd5e1c529d3200c92abc0
+rustup override set nightly
+cargo build --quiet
+
+# Install and save baseline
+cargo install cargo-shape-check
+cargo shape-check save
+
+# Baseline: full workspace rebuild after private edit
+echo "// private comment" >> crates/stdx/src/lib.rs
+time cargo build --quiet
+# ~17s (rebuilds stdx + 22 dependents)
+
+git checkout -- crates/stdx/src/lib.rs
+cargo build --quiet  # settle target/
+
+# Scoped: rebuild only the changed crate
+echo "// private comment" >> crates/stdx/src/lib.rs
+time cargo build --quiet -p stdx
+# ~0.4s (rebuilds stdx only)
+
+# Verify the hash is unchanged
+cargo shape-check check --quiet
+# No public API changes detected
+```
+
+The 35x ratio (17s / 0.5s) represents the difference between rebuilding the
+full workspace and rebuilding only the changed crate. It is the speedup ceiling
+for what native cargo support (cargo#14604) could deliver by skipping
+unnecessary downstream rebuilds.
+
+Hardware: AMD Ryzen 9 7900, 64 GB RAM, Windows 11, SSD. Full methodology and
+raw data in the
+[research repo](https://github.com/sevenevesai/cargo-shape-check/issues/1#issuecomment-4372023169).
 
 <br>
 
@@ -148,6 +218,9 @@ will not change the hash.
 
 - **`pub fn() -> impl Trait`** where the inferred concrete type changes without
   the source signature changing.
+
+- **Implicit `#[inline]`** — the compiler may inline functions not explicitly
+  marked, which source-level parsing cannot detect.
 
 These are inherent to a source-level approach. A rustc-internal implementation
 operating on post-expansion, type-resolved data would close these gaps.

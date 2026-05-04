@@ -1,8 +1,8 @@
 [package]
 name = "cargo-shape-check"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2024"
-description = "Skip unnecessary downstream crate rebuilds by hashing only the public API surface"
+description = "Hash the public API surface of workspace crates to detect private-only vs public-facing changes"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/sevenevesai/cargo-shape-check"
 keywords = ["cargo", "incremental", "compilation", "build", "hash"]
