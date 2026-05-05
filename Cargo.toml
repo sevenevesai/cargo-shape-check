@@ -1,10 +1,11 @@
 [package]
 name = "cargo-shape-check"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2024"
 description = "Hash the public API surface of workspace crates to detect private-only vs public-facing changes"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/sevenevesai/cargo-shape-check"
+homepage = "https://seveneves.ai/crates"
 keywords = ["cargo", "incremental", "compilation", "build", "hash"]
 categories = ["development-tools::cargo-plugins", "development-tools::build-utils"]
 readme = "README.md"
